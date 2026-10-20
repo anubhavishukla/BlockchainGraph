@@ -1,18 +1,15 @@
 
-import pandas as pd
+from pathlib import Path
+import argparse
+import json
+
 import networkx as nx
-
-# Load transaction dataset
-df = pd.read_csv("data/transactions.csv")
-
-# Create a directed graph
-G = nx.DiGraph()
+import pandas as pd
 
 
 def split_values(value):
     if pd.isna(value):
         return []
-
     return [
         item.strip()
         for item in str(value).split("|")
@@ -20,54 +17,108 @@ def split_values(value):
     ]
 
 
-# Build Wallet -> Transaction -> Wallet relationships
-for _, row in df.iterrows():
+def build_graph(csv_path=None):
+    """Build a wallet -> transaction -> wallet directed graph."""
+    if csv_path is None:
+        csv_path = (
+            Path(__file__).resolve().parent.parent
+            / "data"
+            / "transactions.csv"
+        )
 
-    txid = str(row["txid"]).strip()
-    transaction_node = f"TX_{txid}"
+    df = pd.read_csv(csv_path)
 
-    inputs = split_values(row["input_addresses"])
-    outputs = split_values(row["output_addresses"])
+    required = {
+        "txid",
+        "input_addresses",
+        "output_addresses",
+        "timestamp",
+    }
+    missing = required - set(df.columns)
 
-    # Add transaction node with its details
-    G.add_node(
-        transaction_node,
-        node_type="transaction",
-        timestamp=row["timestamp"]
+    if missing:
+        raise ValueError(
+            f"Missing required CSV columns: {sorted(missing)}"
+        )
+
+    graph = nx.DiGraph()
+
+    for _, row in df.iterrows():
+        txid = str(row["txid"]).strip()
+        if not txid or txid.lower() == "nan":
+            continue
+
+        transaction_node = f"TX_{txid}"
+        inputs = split_values(row["input_addresses"])
+        outputs = split_values(row["output_addresses"])
+
+        graph.add_node(
+            transaction_node,
+            node_type="transaction",
+            timestamp=str(row["timestamp"]),
+        )
+
+        for wallet in inputs:
+            graph.add_node(wallet, node_type="wallet")
+            graph.add_edge(
+                wallet,
+                transaction_node,
+                relationship="input",
+            )
+
+        for wallet in outputs:
+            graph.add_node(wallet, node_type="wallet")
+            graph.add_edge(
+                transaction_node,
+                wallet,
+                relationship="output",
+            )
+
+    return graph
+
+
+def graph_summary(graph=None, csv_path=None):
+    """Return graph statistics as a reusable dictionary."""
+    if graph is None:
+        graph = build_graph(csv_path)
+
+    wallet_nodes = [
+        node for node, data in graph.nodes(data=True)
+        if data.get("node_type") == "wallet"
+    ]
+
+    transaction_nodes = [
+        node for node, data in graph.nodes(data=True)
+        if data.get("node_type") == "transaction"
+    ]
+
+    return {
+        "success": True,
+        "total_nodes": graph.number_of_nodes(),
+        "total_edges": graph.number_of_edges(),
+        "wallet_nodes": len(wallet_nodes),
+        "transaction_nodes": len(transaction_nodes),
+        "sample_edges": [
+            {
+                "source": source,
+                "destination": destination,
+                "relationship": data.get("relationship"),
+            }
+            for source, destination, data
+            in list(graph.edges(data=True))[:15]
+        ],
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Build and summarize the transaction graph."
     )
-
-    # Connect input wallets to transaction
-    for wallet in inputs:
-        G.add_node(wallet, node_type="wallet")
-        G.add_edge(wallet, transaction_node, relationship="input")
-
-    # Connect transaction to output wallets
-    for wallet in outputs:
-        G.add_node(wallet, node_type="wallet")
-        G.add_edge(transaction_node, wallet, relationship="output")
-
-
-print("TRANSACTION GRAPH CREATED")
-print("--------------------------")
-print("Total nodes:", G.number_of_nodes())
-print("Total connections:", G.number_of_edges())
-
-wallet_nodes = [
-    node for node, data in G.nodes(data=True)
-    if data.get("node_type") == "wallet"
-]
-
-transaction_nodes = [
-    node for node, data in G.nodes(data=True)
-    if data.get("node_type") == "transaction"
-]
-
-print("Wallet nodes:", len(wallet_nodes))
-print("Transaction nodes:", len(transaction_nodes))
-
-print("\nSample relationships:")
-for source, destination, data in list(G.edges(data=True))[:15]:
-    print(
-        f"{source} -> {destination} "
-        f"| Relationship: {data['relationship']}"
+    parser.add_argument(
+        "--csv",
+        help="Optional path to a transaction CSV file",
     )
+    args = parser.parse_args()
+
+    result = graph_summary(csv_path=args.csv)
+    print(json.dumps(result, indent=2))
